@@ -64,6 +64,7 @@ def import_mongodb_database(connection_string, source_database_name, target_data
         print("-" * 50)
         
         total_documents = 0
+        total_duplicates = 0
         
         for json_file in json_files:
             collection_name = json_file.replace('.json', '')
@@ -85,28 +86,46 @@ def import_mongodb_database(connection_string, source_database_name, target_data
             # Get target collection
             collection = target_db[collection_name]
             
-            # Clear existing data in the collection (optional)
-            existing_count = collection.count_documents({})
-            if existing_count > 0:
-                print(f"  🗑️  Clearing {existing_count} existing documents from {collection_name}")
-                collection.drop()
-            
-            # Insert documents
+            # Insert documents with duplicate handling
             if isinstance(converted_documents, list):
                 if converted_documents:  # Only insert if list is not empty
-                    result = collection.insert_many(converted_documents)
-                    inserted_count = len(result.inserted_ids)
-                    print(f"  ✅ Inserted {inserted_count} documents into {collection_name}")
-                    total_documents += inserted_count
+                    try:
+                        # Try bulk insert first
+                        result = collection.insert_many(converted_documents, ordered=False)
+                        inserted_count = len(result.inserted_ids)
+                        print(f"  ✅ Inserted {inserted_count} documents into {collection_name}")
+                        total_documents += inserted_count
+                        
+                    except pymongo.errors.BulkWriteError as e:
+                        # Handle bulk write errors (including duplicates)
+                        inserted_count = e.details['nInserted']
+                        duplicate_count = len(e.details['writeErrors'])
+                        
+                        print(f"  ✅ Inserted {inserted_count} documents into {collection_name}")
+                        print(f"  ⚠️  Skipped {duplicate_count} duplicate documents")
+                        
+                        total_documents += inserted_count
+                        total_duplicates += duplicate_count
+                        
+                        # Show some duplicate details
+                        if duplicate_count > 0:
+                            print(f"  📝 Duplicate IDs found, skipping duplicates...")
+                            
             else:
                 # Single document
-                result = collection.insert_one(converted_documents)
-                print(f"  ✅ Inserted 1 document into {collection_name}")
-                total_documents += 1
+                try:
+                    result = collection.insert_one(converted_documents)
+                    print(f"  ✅ Inserted 1 document into {collection_name}")
+                    total_documents += 1
+                except pymongo.errors.DuplicateKeyError:
+                    print(f"  ⚠️  Skipped 1 duplicate document in {collection_name}")
+                    total_duplicates += 1
         
         print("-" * 50)
         print(f"🎉 Import completed successfully!")
         print(f"📊 Total documents imported: {total_documents}")
+        if total_duplicates > 0:
+            print(f"⚠️  Total duplicates skipped: {total_duplicates}")
         print(f"🎯 Target database: {target_database_name}")
         
         client.close()
@@ -129,6 +148,7 @@ if __name__ == "__main__":
         print("  - DATABASE_NAME")
         print("  - TARGET_DATABASE_NAME")
         sys.exit(1)
+
     
     print(f"🔗 Connection: {CONNECTION_STRING}")
     print(f"📂 Source database: {SOURCE_DATABASE_NAME}")
